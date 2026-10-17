@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-title" content="Сканворд">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="mobile-web-app-capable" content="yes">
@@ -129,7 +129,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mk.l { left: 0; top: calc(50% - var(--cell) * .15); }
 .mk.t { top: 0; left: calc(50% - var(--cell) * .15); }
 .mk.lt { left: 0; top: 0; }
-#ink { position: absolute; left: 0; top: 0; pointer-events: none; touch-action: none; }
+#ink { position: absolute; left: 0; top: 0; pointer-events: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
 #stage.pen #ink { pointer-events: auto; }
 #stage.pen { touch-action: none; }
 
@@ -2270,12 +2270,38 @@ if (typeof module !== 'undefined') module.exports = { parseDict, generate };
     strokes = strokes.filter(s => !s.pts.some(q => (q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2 < R * R));
     if (strokes.length !== before) redrawInk();
   }
+  // Safari on iPad treats quick repeated taps as double-tap zoom / text selection and
+  // cancels the pointer. Blocking the native touch handling over the sheet keeps every
+  // Pencil touch for the drawing code.
+  const penActive = () => st.settings.mode === 'pen';
+  const block = ev => { if (penActive()) ev.preventDefault(); };
+  for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+    canvas.addEventListener(type, block, { passive: false });
+  }
+  for (const type of ['dblclick', 'selectstart', 'contextmenu', 'gesturestart', 'gesturechange', 'gestureend']) {
+    stage.addEventListener(type, block, { passive: false });
+  }
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', ev => {
+    // stop double-tap zoom anywhere on the page while writing
+    const now = Date.now();
+    if (penActive() && now - lastTouchEnd < 350 && stage.contains(ev.target)) ev.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+
+  function commitStroke() {
+    if (!drawing) return;
+    strokes.push({ w: drawing.w, pts: drawing.pts.map(p => [+p[0].toFixed(3), +p[1].toFixed(3), +p[2].toFixed(2)]) });
+    drawing = null; save();
+  }
   canvas.addEventListener('pointerdown', ev => {
-    if (st.settings.mode !== 'pen') return;
+    if (!penActive()) return;
     if (ev.pointerType === 'pen') penSeen = true;
     if (penSeen && ev.pointerType === 'touch') return;     // ignore the palm once Pencil is in use
     ev.preventDefault();
-    canvas.setPointerCapture(ev.pointerId);
+    commitStroke();                                         // a previous stroke whose "up" got lost
+    erasing = false;
+    try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     pushHistory();
     if (st.settings.tool === 'eraser' || ev.button === 5) { erasing = true; eraseAt(pt(ev)); return; }
     drawing = { w: 0.035, pts: [pt(ev)], id: ev.pointerId };
@@ -2283,11 +2309,13 @@ if (typeof module !== 'undefined') module.exports = { parseDict, generate };
   });
   canvas.addEventListener('pointermove', ev => {
     if (penSeen && ev.pointerType === 'touch') return;
+    if (!erasing && !drawing) return;
+    ev.preventDefault();
     const list = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev];
-    if (erasing) { for (const e of list) eraseAt(pt(e)); return; }
-    if (!drawing || ev.pointerId !== drawing.id) return;
+    if (erasing) { for (const e of (list.length ? list : [ev])) eraseAt(pt(e)); return; }
+    if (ev.pointerId !== drawing.id) return;
     const c = inkColor();
-    for (const e of list) {
+    for (const e of (list.length ? list : [ev])) {
       const p = pt(e);
       const last = drawing.pts[drawing.pts.length - 1];
       if ((p[0] - last[0]) ** 2 + (p[1] - last[1]) ** 2 < 0.0004) continue;
@@ -2298,11 +2326,11 @@ if (typeof module !== 'undefined') module.exports = { parseDict, generate };
   function endStroke(ev) {
     if (erasing) { erasing = false; save(); return; }
     if (!drawing || ev.pointerId !== drawing.id) return;
-    strokes.push({ w: drawing.w, pts: drawing.pts.map(p => [+p[0].toFixed(3), +p[1].toFixed(3), +p[2].toFixed(2)]) });
-    drawing = null; save();
+    commitStroke();
   }
   canvas.addEventListener('pointerup', endStroke);
   canvas.addEventListener('pointercancel', endStroke);
+  canvas.addEventListener('lostpointercapture', endStroke);
   $('undoBtn').addEventListener('click', () => { if (!history.length) return; strokes = history.pop(); redrawInk(); save(); });
   let clearArm = 0;
   $('clearInk').addEventListener('click', () => {
